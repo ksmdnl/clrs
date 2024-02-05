@@ -13,7 +13,15 @@ venv/
 .mypy_cache/
 .pytype/
 .ipynb_checkpoints
+.pylintrc
+py.typed
 
 # Editors
 .idea
 .vscode
+
+*.sh
+*.out
+
+# wandb container
+wandb/

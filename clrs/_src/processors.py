@@ -73,6 +73,275 @@ class Processor(hk.Module):
   def inf_bias_edge(self):
     return False
 
+class MLP(hk.Module):
+  def __init__(
+      self, input_dim, output_dim, dropout: float = 0.0, linear: bool = False
+  ):
+    super().__init__(name="MLP")
+    self.linear = linear
+    self.output_dim = output_dim
+    self.hidden_dim = output_dim
+    self.dropout_rate = dropout
+
+  def __call__(self, x, is_training=False):
+    if self.linear:
+      return hk.Linear(self.output_dim)(x)
+    else:
+      x = hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)(x)
+      x = hk.Linear(self.hidden_dim)(x)
+      if is_training:
+        x = hk.dropout(hk.next_rng_key(), self.dropout_rate, x)
+      x = jax.nn.relu(x)
+      x = hk.Linear(self.output_dim)(x)
+      if is_training:
+        x = hk.dropout(hk.next_rng_key(), self.dropout_rate, x)
+    return x
+
+class EdgeAttention(hk.Module):
+  def __init__(self, d_model, num_heads, dropout):
+    super().__init__(name="EdgeAttention")
+    self.rate = dropout 
+    self.d_model = d_model
+    self.num_heads = num_heads
+    self.d_k = d_model // num_heads
+
+  def __call__(self, query, key, value, mask=None, is_training=False):
+    linears = [hk.Linear(self.d_model, with_bias=False) for _ in range(5)]
+    num_batches = query.shape[0]
+    num_nodes_q = query.shape[1]
+    num_nodes_k = key.shape[1]
+
+    left_k, right_k, left_v, right_v = [
+        l(x) for l, x in zip(linears, (query, key, value, value))
+    ]
+    left_k = left_k.reshape(
+        (num_batches, num_nodes_q, num_nodes_q, self.num_heads, self.d_k)
+    )
+    right_k = right_k.reshape(
+        (num_batches, key.shape[1], key.shape[2], self.num_heads, self.d_k)
+    )
+    left_v = left_v.reshape(right_k.shape)
+    right_v = right_v.reshape(right_k.shape)
+
+    scores = jnp.einsum("bxahd,bayhd->bxayh", left_k, right_k) / jnp.sqrt(
+        self.d_k
+    )
+
+    if mask is not None:
+        scores_dtype = scores.dtype
+        scores = scores.astype(jnp.float32).at[..., None].set(mask, -1e9).astype(scores_dtype)
+
+    att = jax.nn.softmax(scores, axis=2)
+    if is_training:
+      att = hk.dropout(hk.next_rng_key(), self.rate, att)
+
+    val = jnp.einsum("bxahd,bayhd->bxayhd", left_v, right_v)
+    x = jnp.einsum("bxayh,bxayhd->bxyhd", att, val)
+    x = x.reshape((num_batches, num_nodes_q, num_nodes_k, self.d_model))
+
+    return linears[-1](x)
+
+
+class FFN(hk.Module):
+  def __init__(
+      self,
+      embed_dim: int,
+      dropout: float = 0,
+      activation: str = "relu",
+      norm: str = "layer",
+  ):
+    super().__init__(name="FFN")
+
+    self.activation = activation
+    self.embed_dim = embed_dim
+    self.rate = dropout
+    self.norm = norm
+    self.embed_dim = embed_dim
+
+  def __call__(self, x_prior, x, rng=None, is_training=False):
+    if self.activation == "relu":
+        activation_fn = jax.nn.relu
+    elif self.activation == "gelu":
+        activation_fn = jax.nn.gelu
+    else:
+        raise ValueError(f"Activation function {self.activation} is not supported")
+
+    if self.norm == "layer":
+        norm = hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
+        norm_aggregate = hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
+    else:
+        raise ValueError(f"Norm {norm} is not supported")
+
+    if is_training:
+      x = hk.dropout(hk.next_rng_key(), self.rate, x)
+    x = x_prior + x
+    x = norm_aggregate(x)
+
+    x_intermediate = activation_fn(hk.Linear(self.embed_dim * 2)(x))
+    if is_training:
+      x_intermediate = hk.dropout(hk.next_rng_key(), self.rate, x_intermediate)
+    x_intermediate = hk.Linear(self.embed_dim)(x_intermediate)
+    if is_training:
+      x_intermediate = hk.dropout(hk.next_rng_key(), self.rate, x_intermediate)
+
+    x = x_intermediate + x
+    return norm(x)
+
+class EdgeTransformerLayer(hk.Module):
+  def __init__(
+      self,
+      embed_dim: int,
+      num_heads: int,
+      dropout: float,
+      attention_dropout: float,
+      activation: str = 'relu',
+      norm_first: bool = False,
+  ):
+    super().__init__(name="ET_Layer")
+    self.embed_dim = embed_dim
+    self.num_heads = num_heads
+    self.dropout = dropout
+    self.attention_dropout = attention_dropout
+    self.activation = activation
+    self.norm_first = norm_first
+
+  def __call__(self, x_in, mask=None, is_training=False):
+    attention = EdgeAttention(self.embed_dim, self.num_heads, self.attention_dropout)
+    ffn = FFN(self.embed_dim, self.dropout, self.activation, 'layer')
+    x = x_in
+
+    if self.norm_first:
+      x = hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)(x)
+
+    if mask is not None:
+        x_upd = attention(x, x, x, ~mask, is_training=is_training)
+    else:
+        x_upd = attention(x, x, x, is_training=is_training)
+
+    x = ffn(x_in, x_upd, is_training=is_training)
+    return x
+
+class EdgeTransformer(hk.Module):
+  def __init__(
+      self,
+      out_size: int,
+      nb_heads: int,
+      num_layers: int = 5,
+      dropout: float = 0.0,
+      attention_dropout: float = 0.0,
+      residual: bool = False,
+      use_ln: bool = False,
+      activation: str = 'relu',
+      norm_first: bool = False,
+  ):
+    super().__init__(name="EdgeTransformer")
+    self.out_size = out_size
+    self.nb_heads = nb_heads
+    self.dropout = dropout
+    self.attention_dropout = attention_dropout
+    self.residual = residual
+    self.use_ln = use_ln
+    self.num_layers = num_layers
+    self.activation = activation
+    self.norm_first = norm_first
+
+    if out_size % nb_heads != 0:
+      raise ValueError('The number of attention heads must divide the width!')
+
+  def __call__(self, x, is_training=False):
+    """EdgeTransformer inference step."""
+    for _ in range(self.num_layers):
+      x = EdgeTransformerLayer(embed_dim=self.out_size,
+            num_heads=self.nb_heads,
+            dropout=self.dropout,
+            attention_dropout=self.attention_dropout,
+            activation=self.activation,
+            norm_first=self.norm_first)(x, is_training=is_training)
+    return x
+
+class ET_Processor(Processor):
+  def __init__(
+      self,
+      out_size: int,
+      nb_heads: int,
+      num_layers: int,
+      activation: str = 'relu',
+      dropout: float = 0.0,
+      attention_dropout: float = 0.0,
+      residual: bool = False,
+      use_ln: bool = False,
+      name: str = 'edge_t',
+      norm_first: bool = False,
+  ):
+    super().__init__(name=name)
+
+    self.concat_dim = 2 * out_size
+    self.out_size = out_size
+    self.nb_heads = nb_heads
+    self.dropout = dropout
+    self.attention_dropout = attention_dropout
+    self.num_layers = num_layers
+    self.activation = activation
+    self.norm_first = norm_first
+
+  def __call__(
+      self,
+      node_fts: _Array,
+      edge_fts: _Array,
+      graph_fts: _Array,
+      adj_mat: _Array,
+      hidden: _Array,
+      **kwargs,
+  ) -> Tuple[_Array, Optional[_Array]]:
+    """EdgeTransformer inference step."""
+    node_proj = hk.Linear(self.out_size)
+
+    transformer = EdgeTransformer(
+        out_size=self.out_size,
+        nb_heads=self.nb_heads,
+        dropout=self.dropout,
+        attention_dropout=self.attention_dropout,
+        num_layers=self.num_layers,
+        activation=self.activation,
+        norm_first=self.norm_first,
+    )
+
+    b, n, _ = node_fts.shape
+    assert edge_fts.shape[:-1] == (b, n, n)
+    assert graph_fts.shape[:-1] == (b,)
+    assert adj_mat.shape == (b, n, n)
+    is_training = not kwargs['repred']
+    readout = kwargs['readout']
+
+    """Composer"""
+    z = jnp.expand_dims(node_fts, axis=2)  # Shape: (b, n, 1, d)
+    z_repeated = jnp.tile(z, reps=(1, 1, n, 1))  # Shape: (b, n, n, d)
+    z_repeated_t = jnp.transpose(z_repeated, (0, 2, 1, 3))
+    B = jnp.concatenate([z_repeated, z_repeated_t], axis=3)  # Shape: (b, n, n, 2d)
+
+    proj_node_fts = node_proj(B)
+    z_composed = proj_node_fts + edge_fts
+
+    """EdgeTransformer"""
+    z_out = transformer(z_composed, is_training=is_training)
+
+    if readout == 'diagonal':
+      z_out_diag = jnp.einsum('biid->bid', z_out) # Shape: (b, n, d)
+    else:
+      b, n, d = node_fts.shape
+      linear_layer = hk.Linear(2 * d)
+      B_linear = linear_layer(z_out)
+
+      B_linear_first_d = B_linear[:, :, :, :d]
+      B_linear_other_d = B_linear[:, :, :, d:]
+
+      B_linear_first_d_sum = jnp.sum(B_linear_first_d, axis=1)  # Shape: (b, n, d)
+      B_linear_other_d_sum = jnp.sum(B_linear_other_d, axis=2)  # Shape: (b, n, d)
+
+      z_out_diag = B_linear_first_d_sum + B_linear_other_d_sum  # Shape: (b, n, d)
+      z_out_diag = MLP(d, self.out_size, linear=False)(z_out_diag, is_training=is_training)
+
+    return z_out_diag, z_out
 
 class GAT(Processor):
   """Graph Attention Network (Velickovic et al., ICLR 2018)."""
@@ -747,7 +1016,13 @@ def get_processor_factory(kind: str,
     A callable that takes an `out_size` parameter (equal to the hidden
     dimension of the network) and returns a processor instance.
   """
-  def _factory(out_size: int):
+  def _factory(
+    out_size: int,
+    num_layers: int = 3,
+    attention_dropout: float = 0.0,
+    activation: str = 'relu',
+    norm_first: bool = False,
+  ):
     if kind == 'deepsets':
       processor = DeepSets(
           out_size=out_size,
@@ -761,6 +1036,16 @@ def get_processor_factory(kind: str,
           out_size=out_size,
           nb_heads=nb_heads,
           use_ln=use_ln,
+      )
+    elif kind == 'edge_t':
+      processor = ET_Processor(
+          out_size=out_size,
+          nb_heads=nb_heads,
+          use_ln=use_ln,
+          num_layers=num_layers,
+          activation=activation,
+          attention_dropout=attention_dropout,
+          norm_first=norm_first,
       )
     elif kind == 'gat_full':
       processor = GATFull(

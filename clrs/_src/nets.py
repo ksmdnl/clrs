@@ -82,10 +82,15 @@ class Net(hk.Module):
       encoder_init: str,
       dropout_prob: float,
       hint_teacher_forcing: float,
+      num_layers: int,
+      attention_dropout: float,
+      activation: str,
       hint_repred_mode='soft',
       nb_dims=None,
       nb_msg_passing_steps=1,
       name: str = 'net',
+      norm_first: bool = False,
+      node_readout: str = 'diagonal',
   ):
     """Constructs a `Net`."""
     super().__init__(name=name)
@@ -102,6 +107,11 @@ class Net(hk.Module):
     self.use_lstm = use_lstm
     self.encoder_init = encoder_init
     self.nb_msg_passing_steps = nb_msg_passing_steps
+    self.num_layers = num_layers
+    self.attention_dropout = attention_dropout
+    self.activation = activation
+    self.norm_first = norm_first
+    self.node_readout = node_readout
 
   def _msg_passing_step(self,
                         mp_state: _MessagePassingScanState,
@@ -117,7 +127,7 @@ class Net(hk.Module):
                         encs: Dict[str, List[hk.Module]],
                         decs: Dict[str, Tuple[hk.Module]],
                         return_hints: bool,
-                        return_all_outputs: bool
+                        return_all_outputs: bool,
                         ):
     if self.decode_hints and not first_step:
       assert self._hint_repred_mode in ['soft', 'hard', 'hard_on_eval']
@@ -231,7 +241,13 @@ class Net(hk.Module):
     assert len(algorithm_indices) == len(features_list)
 
     self.encoders, self.decoders = self._construct_encoders_decoders()
-    self.processor = self.processor_factory(self.hidden_dim)
+    self.processor = self.processor_factory(
+        self.hidden_dim,
+        num_layers=self.num_layers,
+        attention_dropout=self.attention_dropout,
+        activation=self.activation,
+        norm_first = self.norm_first,
+    )
 
     # Optionally construct LSTM.
     if self.use_lstm:
@@ -407,6 +423,8 @@ class Net(hk.Module):
           nxt_hidden,
           batch_size=batch_size,
           nb_nodes=nb_nodes,
+          repred=repred,
+          readout=self.node_readout,
       )
 
     if not repred:      # dropout only on training

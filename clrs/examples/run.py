@@ -28,10 +28,11 @@ import jax
 import numpy as np
 import requests
 import tensorflow as tf
+import wandb
 
 
-flags.DEFINE_list('algorithms', ['bfs'], 'Which algorithms to run.')
-flags.DEFINE_list('train_lengths', ['4', '7', '11', '13', '16'],
+flags.DEFINE_list('algorithms', ['dijkstra'], 'Which algorithms to run.')
+flags.DEFINE_list('train_lengths', ['16'],
                   'Which training sizes to use. A size of -1 means '
                   'use the benchmark dataset.')
 flags.DEFINE_integer('length_needle', -8,
@@ -49,7 +50,7 @@ flags.DEFINE_boolean('enforce_permutations', True,
                      'Whether to enforce permutation-type node pointers.')
 flags.DEFINE_boolean('enforce_pred_as_input', True,
                      'Whether to change pred_h hints into pred inputs.')
-flags.DEFINE_integer('batch_size', 32, 'Batch size used for training.')
+flags.DEFINE_integer('batch_size', 4, 'Batch size used for training.')
 flags.DEFINE_boolean('chunked_training', False,
                      'Whether to use chunking for training.')
 flags.DEFINE_integer('chunk_length', 16,
@@ -57,17 +58,21 @@ flags.DEFINE_integer('chunk_length', 16,
                      '`chunked_training` is True.')
 flags.DEFINE_integer('train_steps', 10000, 'Number of training iterations.')
 flags.DEFINE_integer('eval_every', 50, 'Evaluation frequency (in steps).')
-flags.DEFINE_integer('test_every', 500, 'Evaluation frequency (in steps).')
+flags.DEFINE_integer('test_every', 500, 'Test frequency (in steps).')
 
-flags.DEFINE_integer('hidden_size', 128,
+flags.DEFINE_integer('hidden_size', 192,
                      'Number of hidden units of the model.')
-flags.DEFINE_integer('nb_heads', 1, 'Number of heads for GAT processors')
+flags.DEFINE_integer('num_layers', 3,
+                     'Number of layers of the network.')
+flags.DEFINE_integer('nb_heads', 12, 'Number of heads for GAT processors')
 flags.DEFINE_integer('nb_msg_passing_steps', 1,
                      'Number of message passing steps to run per hint.')
-flags.DEFINE_float('learning_rate', 0.001, 'Learning rate to use.')
+flags.DEFINE_float('learning_rate', 2.5e-4, 'Learning rate to use.')
 flags.DEFINE_float('grad_clip_max_norm', 1.0,
                    'Gradient clipping by norm. 0.0 disables grad clipping')
 flags.DEFINE_float('dropout_prob', 0.0, 'Dropout rate to use.')
+flags.DEFINE_float('attention_dropout_prob', 0.0, 'Dropout rate in the attention heads to use.')
+flags.DEFINE_enum('activation', 'relu', ['relu', 'gelu'], 'Type of activation function to use.')
 flags.DEFINE_float('hint_teacher_forcing', 0.0,
                    'Probability that ground-truth teacher hints are encoded '
                    'during training instead of predicted hints. Only '
@@ -94,6 +99,8 @@ flags.DEFINE_enum('hint_repred_mode', 'soft', ['soft', 'hard', 'hard_on_eval'],
                   'thresholding of masks. '
                   'In hard_on_eval mode, soft mode is '
                   'used for training and hard mode is used for evaluation.')
+flags.DEFINE_boolean('norm_first_att', True,
+                     'Whether to normalize the input to the attention layers.')
 flags.DEFINE_boolean('use_ln', True,
                      'Whether to use layer normalisation in the processor.')
 flags.DEFINE_boolean('use_lstm', False,
@@ -104,18 +111,27 @@ flags.DEFINE_integer('nb_triplet_fts', 8,
 flags.DEFINE_enum('encoder_init', 'xavier_on_scalars',
                   ['default', 'xavier_on_scalars'],
                   'Initialiser to use for the encoders.')
-flags.DEFINE_enum('processor_type', 'triplet_gmpnn',
+flags.DEFINE_enum('processor_type', 'edge_t',
                   ['deepsets', 'mpnn', 'pgn', 'pgn_mask',
                    'triplet_mpnn', 'triplet_pgn', 'triplet_pgn_mask',
                    'gat', 'gatv2', 'gat_full', 'gatv2_full',
                    'gpgn', 'gpgn_mask', 'gmpnn',
-                   'triplet_gpgn', 'triplet_gpgn_mask', 'triplet_gmpnn'],
+                   'triplet_gpgn', 'triplet_gpgn_mask', 'triplet_gmpnn', 'edge_t'],
                   'Processor type to use as the network P.')
+flags.DEFINE_enum('node_readout', 'diagonal',
+                  ['diagonal', 'sophisticated'],
+                  'Method to extract the node features from transformer output.')
 
 flags.DEFINE_string('checkpoint_path', '/tmp/CLRS30',
                     'Path in which checkpoints are saved.')
 flags.DEFINE_string('dataset_path', '/tmp/CLRS30',
                     'Path in which dataset is stored.')
+flags.DEFINE_string('wandb_entity', None,
+                    'Name of `wandb` entity.')
+flags.DEFINE_string('wandb_project', None,
+                    'Name of `wandb` project.')
+flags.DEFINE_string('wandb_name', None,
+                    'Name of `wandb` run.')
 flags.DEFINE_boolean('freeze_processor', False,
                      'Whether to freeze the processor of the model.')
 
@@ -385,6 +401,29 @@ def main(unused_argv):
    test_samplers, test_sample_counts,
    spec_list) = create_samplers(rng, train_lengths)
 
+  if FLAGS.wandb_project:
+    config = {
+      "processor": FLAGS.processor_type,
+      "algorithm": FLAGS.algorithms[0],
+      "activation": FLAGS.activation,
+      "step_nums": FLAGS.train_steps,
+      "lr": FLAGS.learning_rate,
+      "batch_size": FLAGS.batch_size,
+      "nb_heads": FLAGS.nb_heads,
+      "num_layers": FLAGS.num_layers,
+      "hidden_size": FLAGS.hidden_size,
+      "attention_dropout_rate": FLAGS.attention_dropout_prob,
+      "norm_first_att": FLAGS.norm_first_att,
+      "seed_param": FLAGS.seed,
+      "readout": FLAGS.node_readout,
+    }
+    wandb.init(
+      entity=FLAGS.wandb_entity,
+      project=FLAGS.wandb_project,
+      name=FLAGS.wandb_name,
+      config={"dataset": "clrs30", **dict(config)},
+    )
+
   processor_factory = clrs.get_processor_factory(
       FLAGS.processor_type,
       use_ln=FLAGS.use_ln,
@@ -406,6 +445,11 @@ def main(unused_argv):
       hint_teacher_forcing=FLAGS.hint_teacher_forcing,
       hint_repred_mode=FLAGS.hint_repred_mode,
       nb_msg_passing_steps=FLAGS.nb_msg_passing_steps,
+      num_layers=FLAGS.num_layers,
+      activation=FLAGS.activation,
+      attention_dropout=FLAGS.attention_dropout_prob,
+      norm_first_att=FLAGS.norm_first_att,
+      node_readout=FLAGS.node_readout,
       )
 
   eval_model = clrs.models.BaselineModel(
@@ -431,6 +475,7 @@ def main(unused_argv):
   # until all algos have had at least one evaluation.
   val_scores = [-99999.9] * len(FLAGS.algorithms)
   length_idx = 0
+  accum_loss = 0
 
   while step < FLAGS.train_steps:
     feedback_list = [next(t) for t in train_samplers]
@@ -462,6 +507,7 @@ def main(unused_argv):
         # since there is no state to maintain between batches.
         length_and_algo_idx = algo_idx
       cur_loss = train_model.feedback(rng_key, feedback, length_and_algo_idx)
+      accum_loss += cur_loss
       rng_key = new_rng_key
 
       if FLAGS.chunked_training:
@@ -492,6 +538,15 @@ def main(unused_argv):
         logging.info('(val) algo %s step %d: %s',
                      FLAGS.algorithms[algo_idx], step, val_stats)
         val_scores[algo_idx] = val_stats['score']
+        if FLAGS.wandb_project:
+          if step > 0:
+            avg_loss = accum_loss / FLAGS.eval_every
+            wandb.log(
+                {
+                    "loss": avg_loss,
+                    "val_score": val_stats['score'],
+                }
+            )
 
       next_eval += FLAGS.eval_every
 
@@ -510,10 +565,13 @@ def main(unused_argv):
       else:
         logging.info('Not saving new best model, %s', msg)
 
+      accum_loss = 0
+      avg_loss = 0
+
     step += 1
     length_idx = (length_idx + 1) % len(train_lengths)
 
-  logging.info('Restoring best model from checkpoint...')
+  logging.info(f'Restoring best model from checkpoint {FLAGS.checkpoint_path}...')
   eval_model.restore_model('best.pkl', only_load_processor=False)
 
   for algo_idx in range(len(train_samplers)):
@@ -529,6 +587,8 @@ def main(unused_argv):
         new_rng_key,
         extras=common_extras)
     logging.info('(test) algo %s : %s', FLAGS.algorithms[algo_idx], test_stats)
+    if FLAGS.wandb_project:
+        wandb.log({"test_score": test_stats['score']})
 
   logging.info('Done!')
 

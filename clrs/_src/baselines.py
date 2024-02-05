@@ -155,6 +155,11 @@ class BaselineModel(model.Model):
       hint_repred_mode: str = 'soft',
       name: str = 'base_model',
       nb_msg_passing_steps: int = 1,
+      num_layers: int = 3,
+      activation: str = 'relu',
+      attention_dropout: float = 0.0,
+      norm_first_att: bool = False,
+      node_readout: str = 'diagonal',
   ):
     """Constructor for BaselineModel.
 
@@ -239,21 +244,22 @@ class BaselineModel(model.Model):
       self.nb_dims.append(nb_dims)
 
     self._create_net_fns(hidden_dim, encode_hints, processor_factory, use_lstm,
-                         encoder_init, dropout_prob, hint_teacher_forcing,
-                         hint_repred_mode)
+                         encoder_init, dropout_prob, hint_teacher_forcing, hint_repred_mode, 
+                         num_layers, activation, attention_dropout, norm_first_att, node_readout)
     self._device_params = None
     self._device_opt_state = None
     self.opt_state_skeleton = None
 
   def _create_net_fns(self, hidden_dim, encode_hints, processor_factory,
                       use_lstm, encoder_init, dropout_prob,
-                      hint_teacher_forcing, hint_repred_mode):
+                      hint_teacher_forcing, hint_repred_mode,
+                      num_layers, activation, attention_dropout, norm_first_att, node_readout):
     def _use_net(*args, **kwargs):
       return nets.Net(self._spec, hidden_dim, encode_hints, self.decode_hints,
                       processor_factory, use_lstm, encoder_init,
-                      dropout_prob, hint_teacher_forcing,
-                      hint_repred_mode,
-                      self.nb_dims, self.nb_msg_passing_steps)(*args, **kwargs)
+                      dropout_prob, hint_teacher_forcing, num_layers,
+                      attention_dropout, activation, hint_repred_mode,
+                      self.nb_dims, self.nb_msg_passing_steps, norm_first=norm_first_att, node_readout=node_readout)(*args, **kwargs)
 
     self.net_fn = hk.transform(_use_net)
     pmap_args = dict(axis_name='batch', devices=jax.local_devices())
