@@ -27,6 +27,7 @@ __all__ = (
     "BaselineModelChunked",
     "GAT",
     "MPNN",
+    "ET_Processor",
     "Net",
     "NetChunked",
 )
