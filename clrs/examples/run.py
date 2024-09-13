@@ -73,6 +73,10 @@ flags.DEFINE_float('grad_clip_max_norm', 1.0,
 flags.DEFINE_float('dropout_prob', 0.0, 'Dropout rate to use.')
 flags.DEFINE_float('attention_dropout_prob', 0.0, 'Dropout rate in the attention heads to use.')
 flags.DEFINE_enum('activation', 'relu', ['relu', 'gelu'], 'Type of activation function to use.')
+flags.DEFINE_integer('use_graph_fts', 1,
+                     'Whether to use the graph features.')
+flags.DEFINE_integer('ood_val', 0,
+                     'Whether to apply bigger graphs for the val. samples.')
 flags.DEFINE_float('hint_teacher_forcing', 0.0,
                    'Probability that ground-truth teacher hints are encoded '
                    'during training instead of predicted hints. Only '
@@ -345,7 +349,11 @@ def create_samplers(rng, train_lengths: List[int]):
       train_sampler, _, spec = make_multi_sampler(**train_args)
 
       mult = clrs.CLRS_30_ALGS_SETTINGS[algorithm]['num_samples_multiplier']
-      val_args = dict(sizes=[np.amax(train_lengths)],
+      if FLAGS.ood_val:
+          val_size = [32]
+      else:
+          val_size = [np.amax(train_lengths)]
+      val_args = dict(sizes=val_size,
                       split='val',
                       batch_size=32,
                       multiplier=2 * mult,
@@ -406,6 +414,10 @@ def main(unused_argv):
    spec_list, is_graph_fts_avail) = create_samplers(rng, train_lengths)
 
   if FLAGS.wandb_project:
+    if FLAGS.ood_val:
+        val_size = [32]
+    else:
+        val_size = [np.amax(train_lengths)]
     config = {
       "processor": FLAGS.processor_type,
       "algorithm": FLAGS.algorithms[0],
@@ -420,6 +432,8 @@ def main(unused_argv):
       "norm_first_att": FLAGS.norm_first_att,
       "seed_param": FLAGS.seed,
       "readout": FLAGS.node_readout,
+      "ood_val": FLAGS.ood_val,
+      "val_size": val_size,
     }
     wandb.init(
       entity=FLAGS.wandb_entity,
@@ -454,7 +468,9 @@ def main(unused_argv):
       attention_dropout=FLAGS.attention_dropout_prob,
       norm_first_att=FLAGS.norm_first_att,
       node_readout=FLAGS.node_readout,
-      )
+  )
+  if not FLAGS.use_graph_fts:
+      is_graph_fts_avail = [False] * len(is_graph_fts_avail)
 
   eval_model = clrs.models.BaselineModel(
       spec=spec_list,
