@@ -128,6 +128,7 @@ class Net(hk.Module):
                         decs: Dict[str, Tuple[hk.Module]],
                         return_hints: bool,
                         return_all_outputs: bool,
+                        is_graph_fts_avail: bool,
                         ):
     if self.decode_hints and not first_step:
       assert self._hint_repred_mode in ['soft', 'hard', 'hard_on_eval']
@@ -175,7 +176,7 @@ class Net(hk.Module):
     hiddens, output_preds_cand, hint_preds, lstm_state = self._one_step_pred(
         inputs, cur_hint, mp_state.hiddens,
         batch_size, nb_nodes, mp_state.lstm_state,
-        spec, encs, decs, repred)
+        spec, encs, decs, repred, is_graph_fts_avail)
 
     if first_step:
       output_preds = output_preds_cand
@@ -205,7 +206,8 @@ class Net(hk.Module):
   def __call__(self, features_list: List[_Features], repred: bool,
                algorithm_index: int,
                return_hints: bool,
-               return_all_outputs: bool):
+               return_all_outputs: bool,
+               is_graph_fts_avail: bool):
     """Process one batch of data.
 
     Args:
@@ -238,6 +240,7 @@ class Net(hk.Module):
       algorithm_indices = range(len(features_list))
     else:
       algorithm_indices = [algorithm_index]
+      is_graph_fts_avail = [is_graph_fts_avail]
     assert len(algorithm_indices) == len(features_list)
 
     self.encoders, self.decoders = self._construct_encoders_decoders()
@@ -259,7 +262,7 @@ class Net(hk.Module):
       self.lstm = None
       lstm_init = lambda x: 0
 
-    for algorithm_index, features in zip(algorithm_indices, features_list):
+    for algorithm_index, features, graph_fts_avail in zip(algorithm_indices, features_list, is_graph_fts_avail):
       inputs = features.inputs
       hints = features.hints
       lengths = features.lengths
@@ -295,6 +298,7 @@ class Net(hk.Module):
           decs=self.decoders[algorithm_index],
           return_hints=return_hints,
           return_all_outputs=return_all_outputs,
+          is_graph_fts_avail=graph_fts_avail,
           )
       mp_state, lean_mp_state = self._msg_passing_step(
           mp_state,
@@ -383,6 +387,7 @@ class Net(hk.Module):
       encs: Dict[str, List[hk.Module]],
       decs: Dict[str, Tuple[hk.Module]],
       repred: bool,
+      is_graph_fts: bool,
   ):
     """Generates one-step predictions."""
 
@@ -425,6 +430,7 @@ class Net(hk.Module):
           nb_nodes=nb_nodes,
           repred=repred,
           readout=self.node_readout,
+          is_graph_fts_avail=is_graph_fts,
       )
 
     if not repred:      # dropout only on training

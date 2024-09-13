@@ -295,6 +295,7 @@ def create_samplers(rng, train_lengths: List[int]):
   test_samplers = []
   test_sample_counts = []
   spec_list = []
+  is_graph_fts_avail = []
 
   for algo_idx, algorithm in enumerate(FLAGS.algorithms):
     # Make full dataset pipeline run on CPU (including prefetching).
@@ -370,11 +371,14 @@ def create_samplers(rng, train_lengths: List[int]):
     val_sample_counts.append(val_samples)
     test_samplers.append(test_sampler)
     test_sample_counts.append(test_samples)
+    input_spec = list(filter(lambda x: x[0] in ['input', 'hint'], spec.values()))
+    graph_fts_exists = any('graph' in value for value in input_spec) 
+    is_graph_fts_avail.append(graph_fts_exists)
 
   return (train_samplers,
           val_samplers, val_sample_counts,
           test_samplers, test_sample_counts,
-          spec_list)
+          spec_list, is_graph_fts_avail)
 
 
 def main(unused_argv):
@@ -399,7 +403,7 @@ def main(unused_argv):
   (train_samplers,
    val_samplers, val_sample_counts,
    test_samplers, test_sample_counts,
-   spec_list) = create_samplers(rng, train_lengths)
+   spec_list, is_graph_fts_avail) = create_samplers(rng, train_lengths)
 
   if FLAGS.wandb_project:
     config = {
@@ -477,6 +481,8 @@ def main(unused_argv):
   length_idx = 0
   accum_loss = 0
 
+  for algo_idx in range(len(train_samplers)):
+    logging.info(f"{FLAGS.algorithms[algo_idx]} has graph features: {is_graph_fts_avail[algo_idx]}")
   while step < FLAGS.train_steps:
     feedback_list = [next(t) for t in train_samplers]
 
@@ -492,7 +498,7 @@ def main(unused_argv):
             for _ in range(len(train_lengths))]
         train_model.init(all_length_features[:-1], FLAGS.seed + 1)
       else:
-        train_model.init(all_features, FLAGS.seed + 1)
+        train_model.init(all_features, is_graph_fts_avail, FLAGS.seed + 1)
 
     # Training step.
     for algo_idx in range(len(train_samplers)):
@@ -506,7 +512,7 @@ def main(unused_argv):
         # In non-chunked training, all training lengths can be treated equally,
         # since there is no state to maintain between batches.
         length_and_algo_idx = algo_idx
-      cur_loss = train_model.feedback(rng_key, feedback, length_and_algo_idx)
+      cur_loss = train_model.feedback(rng_key, feedback, is_graph_fts_avail[algo_idx], length_and_algo_idx)
       accum_loss += cur_loss
       rng_key = new_rng_key
 
@@ -531,7 +537,7 @@ def main(unused_argv):
         new_rng_key, rng_key = jax.random.split(rng_key)
         val_stats = collect_and_eval(
             val_samplers[algo_idx],
-            functools.partial(eval_model.predict, algorithm_index=algo_idx),
+            functools.partial(eval_model.predict, algorithm_index=algo_idx, is_graph_fts_avail=is_graph_fts_avail[algo_idx]),
             val_sample_counts[algo_idx],
             new_rng_key,
             extras=common_extras)
@@ -582,7 +588,7 @@ def main(unused_argv):
     new_rng_key, rng_key = jax.random.split(rng_key)
     test_stats = collect_and_eval(
         test_samplers[algo_idx],
-        functools.partial(eval_model.predict, algorithm_index=algo_idx),
+        functools.partial(eval_model.predict, algorithm_index=algo_idx, is_graph_fts_avail=is_graph_fts_avail[algo_idx]),
         test_sample_counts[algo_idx],
         new_rng_key,
         extras=common_extras)

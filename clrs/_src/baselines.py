@@ -271,23 +271,23 @@ class BaselineModel(model.Model):
     self._maybe_pmean = pmean if n_devices > 1 else lambda x: x
     extra_args[static_arg] = 3
     self.jitted_grad = func(self._compute_grad, **extra_args)
-    extra_args[static_arg] = 4
+    extra_args[static_arg] = [4, 5]
     self.jitted_feedback = func(self._feedback, donate_argnums=[0, 3],
                                 **extra_args)
-    extra_args[static_arg] = [3, 4, 5]
+    extra_args[static_arg] = [3, 4, 5, 6]
     self.jitted_predict = func(self._predict, **extra_args)
     extra_args[static_arg] = [3, 4]
     self.jitted_accum_opt_update = func(accum_opt_update, donate_argnums=[0, 2],
                                         **extra_args)
 
-  def init(self, features: Union[_Features, List[_Features]], seed: _Seed):
+  def init(self, features: Union[_Features, List[_Features]], is_graph_fts_avail: List, seed: _Seed):
     if not isinstance(features, list):
       assert len(self._spec) == 1
       features = [features]
     self.params = self.net_fn.init(jax.random.PRNGKey(seed), features, True,  # pytype: disable=wrong-arg-types  # jax-ndarray
                                    algorithm_index=-1,
                                    return_hints=False,
-                                   return_all_outputs=False)
+                                   return_all_outputs=False, is_graph_fts_avail=is_graph_fts_avail)
     self.opt_state = self.opt.init(self.params)
     # We will use the optimizer state skeleton for traversal when we
     # want to avoid updating the state of params of untrained algorithms.
@@ -318,9 +318,9 @@ class BaselineModel(model.Model):
         params, rng_key, feedback, algorithm_index)
     return self._maybe_pmean(lss), self._maybe_pmean(grads)
 
-  def _feedback(self, params, rng_key, feedback, opt_state, algorithm_index):
+  def _feedback(self, params, rng_key, feedback, opt_state, algorithm_index, is_graph_fts_avail):
     lss, grads = jax.value_and_grad(self._loss)(
-        params, rng_key, feedback, algorithm_index)
+        params, rng_key, feedback, algorithm_index, is_graph_fts_avail)
     grads = self._maybe_pmean(grads)
     params, opt_state = self._update_params(params, grads, opt_state,
                                             algorithm_index)
@@ -329,12 +329,13 @@ class BaselineModel(model.Model):
 
   def _predict(self, params, rng_key: hk.PRNGSequence, features: _Features,
                algorithm_index: int, return_hints: bool,
-               return_all_outputs: bool):
+               return_all_outputs: bool, is_graph_fts_avail: bool):
     outs, hint_preds = self.net_fn.apply(
         params, rng_key, [features],
         repred=True, algorithm_index=algorithm_index,
         return_hints=return_hints,
-        return_all_outputs=return_all_outputs)
+        return_all_outputs=return_all_outputs,
+        is_graph_fts_avail=is_graph_fts_avail)
     outs = decoders.postprocess(self._spec[algorithm_index],
                                 outs,
                                 sinkhorn_temperature=0.1,
@@ -366,7 +367,7 @@ class BaselineModel(model.Model):
 
     return  loss, grads
 
-  def feedback(self, rng_key: hk.PRNGSequence, feedback: _Feedback,
+  def feedback(self, rng_key: hk.PRNGSequence, feedback: _Feedback, is_graph_fts_avail: bool,
                algorithm_index=None) -> float:
     if algorithm_index is None:
       assert len(self._spec) == 1
@@ -376,14 +377,15 @@ class BaselineModel(model.Model):
     feedback = _maybe_pmap_data(feedback)
     loss, self._device_params, self._device_opt_state = self.jitted_feedback(
         self._device_params, rng_keys, feedback,
-        self._device_opt_state, algorithm_index)
+        self._device_opt_state, algorithm_index, is_graph_fts_avail)
     loss = _maybe_pick_first_pmapped(loss)
     return loss
 
   def predict(self, rng_key: hk.PRNGSequence, features: _Features,
               algorithm_index: Optional[int] = None,
               return_hints: bool = False,
-              return_all_outputs: bool = False):
+              return_all_outputs: bool = False,
+              is_graph_fts_avail: bool = False):
     """Model inference step."""
     if algorithm_index is None:
       assert len(self._spec) == 1
@@ -396,16 +398,18 @@ class BaselineModel(model.Model):
             self._device_params, rng_keys, features,
             algorithm_index,
             return_hints,
-            return_all_outputs))
+            return_all_outputs,
+            is_graph_fts_avail))
 
-  def _loss(self, params, rng_key, feedback, algorithm_index):
+  def _loss(self, params, rng_key, feedback, algorithm_index, is_graph_fts_avail):
     """Calculates model loss f(feedback; params)."""
     output_preds, hint_preds = self.net_fn.apply(
         params, rng_key, [feedback.features],
         repred=False,
         algorithm_index=algorithm_index,
         return_hints=True,
-        return_all_outputs=False)
+        return_all_outputs=False,
+        is_graph_fts_avail=is_graph_fts_avail)
 
     nb_nodes = _nb_nodes(feedback, is_chunked=False)
     lengths = feedback.features.lengths
