@@ -140,6 +140,14 @@ flags.DEFINE_string('wandb_name', None,
                     'Name of `wandb` run.')
 flags.DEFINE_boolean('freeze_processor', False,
                      'Whether to freeze the processor of the model.')
+flags.DEFINE_string('wandb_sweep_file', None,
+                    'Name of `wandb` file for hyperparameter sweeping.')
+flags.DEFINE_integer('wandb_sweep_count', 1,
+                    'Sweeping duration.')
+flags.DEFINE_integer('train', 1,
+                    'Enable evaluation on test set.')
+flags.DEFINE_integer('test', 1,
+                    'Enable evaluation on test set.')
 
 FLAGS = flags.FLAGS
 
@@ -157,6 +165,35 @@ PRED_AS_INPUT_ALGOS = [
     'naive_string_matcher',
     'kmp_matcher',
     'jarvis_march']
+
+def merge_config(config):
+  sweep_params = config.keys()
+  if "processors" in sweep_params:
+    FLAGS.processor_type = config['processors']
+  if "algorithms" in sweep_params:
+    FLAGS.algorithms = [config["algorithms"]]
+  if "activation" in sweep_params:
+    FLAGS.activation = config["activation"]
+  if "lr" in sweep_params:
+    FLAGS.learning_rate = config["lr"]
+  if "num_heads" in sweep_params:
+    FLAGS.nb_heads = config["num_heads"]
+  if "hidden_dim" in sweep_params:
+    FLAGS.hidden_size = config["hidden_dim"]
+  if "num_triplet_fts" in sweep_params:
+    FLAGS.nb_triplet_fts = config["num_triplet_fts"]
+  if "num_layers" in sweep_params:
+    FLAGS.num_layers = config["num_layers"]
+  if "attention_dropout_prob" in sweep_params:
+    FLAGS.attention_dropout_prob = config["attention_dropout_prob"]
+  if "norm_fist_att" in sweep_params:
+    FLAGS.norm_first_att = config["norm_first_att"]
+  if "ood_val" in sweep_params:
+    FLAGS.ood_val = config["ood_val"]
+  if "seed" in sweep_params:
+    FLAGS.seed = config["seed"]
+  if "batch_size" in sweep_params:
+    FLAGS.batch_size = config["batch_size"]
 
 
 def unpack(v):
@@ -406,20 +443,70 @@ def main(unused_argv):
 
   train_lengths = [int(x) for x in FLAGS.train_lengths]
 
+  if FLAGS.wandb_sweep_file is None:
+    run(train_lengths, encode_hints, decode_hints)
+  else:
+    """Load the parameters in a pre-defined sweep file
+        and passed these into wandb.agent API which starts the sweep.
+    """
+    from functools import partial
+    import yaml
+
+    with open(FLAGS.wandb_sweep_file, "r") as f:
+        sweep_config = yaml.safe_load(f)
+
+    sweep_id = wandb.sweep(
+        sweep_config,
+        project=FLAGS.wandb_project,
+    )
+    # Sweep is run here inside ´wandb.agent´
+    wandb.agent(sweep_id, function=partial(run, train_lengths, encode_hints, decode_hints), count=FLAGS.wandb_sweep_count)
+
+def set_checkpoint(config):
+  """Set the checkpoint path given parameters defined by the global flags.
+  Global flags will be modified here.
+
+  Args:
+    config: A dictionary containing all parameters.
+  """
+  if FLAGS.wandb_project:
+    checkpoint_path = os.path.join(FLAGS.checkpoint_path, FLAGS.wandb_project, str(FLAGS.seed), FLAGS.algorithms[0])
+    if FLAGS.wandb_sweep_file:
+      suffix = f"{config['processor']}-" \
+        f"{config['activation']}-" \
+        f"{config['lr']}-" \
+        f"{config['nb_heads']}-" \
+        f"{config['num_layers']}-" \
+        f"{config['hidden_size']}-" \
+        f"{config['attention_dropout_rate']}-" \
+        f"{config['ood_val']}-" \
+        f"{config['seed_param']}/" \
+        f"{config['algorithm']}"
+      checkpoint_path = os.path.join(checkpoint_path, suffix)
+  else:
+    checkpoint_path = os.path.join(checkpoint_path, str(FLAGS.seed), FLAGS.algorithms[0])
+
+  return checkpoint_path
+
+def run(train_lengths, encode_hints, decode_hints):
   rng = np.random.RandomState(FLAGS.seed)
   rng_key = jax.random.PRNGKey(rng.randint(2**32))
 
-  # Create samplers
-  (train_samplers,
-   val_samplers, val_sample_counts,
-   test_samplers, test_sample_counts,
-   spec_list, is_graph_fts_avail) = create_samplers(rng, train_lengths)
-
-  if FLAGS.wandb_project:
+  if FLAGS.wandb_sweep_file is not None or FLAGS.wandb_project:
     if FLAGS.ood_val:
         val_size = [32]
     else:
         val_size = [np.amax(train_lengths)]
+    
+    wandb_run = wandb.init(
+      entity=FLAGS.wandb_entity,
+      project=FLAGS.wandb_project,
+      name=FLAGS.wandb_name,
+    )
+
+    if FLAGS.wandb_sweep_file is not None:
+      merge_config(wandb_run.config)
+
     config = {
       "processor": FLAGS.processor_type,
       "algorithm": FLAGS.algorithms[0],
@@ -438,19 +525,25 @@ def main(unused_argv):
       "val_size": val_size,
       "markov": FLAGS.markov,
     }
-    wandb.init(
-      entity=FLAGS.wandb_entity,
-      project=FLAGS.wandb_project,
-      name=FLAGS.wandb_name,
-      config={"dataset": "clrs30", **dict(config)},
-    )
+    wandb_run.config.update({"dataset": "clrs30", **dict(config)})
+  else:
+    config = None
+
+  # Create samplers
+  (train_samplers,
+   val_samplers, val_sample_counts,
+   test_samplers, test_sample_counts,
+   spec_list, is_graph_fts_avail) = create_samplers(rng, train_lengths)
 
   processor_factory = clrs.get_processor_factory(
       FLAGS.processor_type,
       use_ln=FLAGS.use_ln,
       nb_triplet_fts=FLAGS.nb_triplet_fts,
-      nb_heads=FLAGS.nb_heads
+      nb_heads=FLAGS.nb_heads,
   )
+
+  checkpoint_path = set_checkpoint(config)
+
   model_params = dict(
       processor_factory=processor_factory,
       hidden_dim=FLAGS.hidden_size,
@@ -460,7 +553,7 @@ def main(unused_argv):
       use_lstm=FLAGS.use_lstm,
       learning_rate=FLAGS.learning_rate,
       grad_clip_max_norm=FLAGS.grad_clip_max_norm,
-      checkpoint_path=FLAGS.checkpoint_path,
+      checkpoint_path=checkpoint_path,
       freeze_processor=FLAGS.freeze_processor,
       dropout_prob=FLAGS.dropout_prob,
       hint_teacher_forcing=FLAGS.hint_teacher_forcing,
@@ -501,120 +594,125 @@ def main(unused_argv):
   length_idx = 0
   accum_loss = 0
 
+  logging.info(f"Checkpoint is saved in {checkpoint_path}")
   for algo_idx in range(len(train_samplers)):
     logging.info(f"{FLAGS.algorithms[algo_idx]} has graph features: {is_graph_fts_avail[algo_idx]}")
-  while step < FLAGS.train_steps:
-    feedback_list = [next(t) for t in train_samplers]
+  if FLAGS.train == 1:
+    while step < FLAGS.train_steps:
+      feedback_list = [next(t) for t in train_samplers]
 
-    # Initialize model.
-    if step == 0:
-      all_features = [f.features for f in feedback_list]
-      if FLAGS.chunked_training:
-        # We need to initialize the model with samples of all lengths for
-        # all algorithms. Also, we need to make sure that the order of these
-        # sample sizes is the same as the order of the actual training sizes.
-        all_length_features = [all_features] + [
-            [next(t).features for t in train_samplers]
-            for _ in range(len(train_lengths))]
-        train_model.init(all_length_features[:-1], FLAGS.seed + 1)
-      else:
-        train_model.init(all_features, is_graph_fts_avail, FLAGS.seed + 1)
+      # Initialize model.
+      if step == 0:
+        all_features = [f.features for f in feedback_list]
+        if FLAGS.chunked_training:
+          # We need to initialize the model with samples of all lengths for
+          # all algorithms. Also, we need to make sure that the order of these
+          # sample sizes is the same as the order of the actual training sizes.
+          all_length_features = [all_features] + [
+              [next(t).features for t in train_samplers]
+              for _ in range(len(train_lengths))]
+          train_model.init(all_length_features[:-1], FLAGS.seed + 1)
+        else:
+          train_model.init(all_features, is_graph_fts_avail, FLAGS.seed + 1)
 
-    # Training step.
-    for algo_idx in range(len(train_samplers)):
-      feedback = feedback_list[algo_idx]
-      rng_key, new_rng_key = jax.random.split(rng_key)
-      if FLAGS.chunked_training:
-        # In chunked training, we must indicate which training length we are
-        # using, so the model uses the correct state.
-        length_and_algo_idx = (length_idx, algo_idx)
-      else:
-        # In non-chunked training, all training lengths can be treated equally,
-        # since there is no state to maintain between batches.
-        length_and_algo_idx = algo_idx
-      cur_loss = train_model.feedback(rng_key, feedback, is_graph_fts_avail[algo_idx], length_and_algo_idx)
-      accum_loss += cur_loss
-      rng_key = new_rng_key
-
-      if FLAGS.chunked_training:
-        examples_in_chunk = np.sum(feedback.features.is_last).item()
-      else:
-        examples_in_chunk = len(feedback.features.lengths)
-      current_train_items[algo_idx] += examples_in_chunk
-      logging.info('Algo %s step %i current loss %f, current_train_items %i.',
-                   FLAGS.algorithms[algo_idx], step,
-                   cur_loss, current_train_items[algo_idx])
-
-    # Periodically evaluate model
-    if step >= next_eval:
-      eval_model.params = train_model.params
+      # Training step.
       for algo_idx in range(len(train_samplers)):
-        common_extras = {'examples_seen': current_train_items[algo_idx],
-                         'step': step,
-                         'algorithm': FLAGS.algorithms[algo_idx]}
+        feedback = feedback_list[algo_idx]
+        rng_key, new_rng_key = jax.random.split(rng_key)
+        if FLAGS.chunked_training:
+          # In chunked training, we must indicate which training length we are
+          # using, so the model uses the correct state.
+          length_and_algo_idx = (length_idx, algo_idx)
+        else:
+          # In non-chunked training, all training lengths can be treated equally,
+          # since there is no state to maintain between batches.
+          length_and_algo_idx = algo_idx
+        cur_loss = train_model.feedback(rng_key, feedback, is_graph_fts_avail[algo_idx], length_and_algo_idx)
+        accum_loss += cur_loss
+        rng_key = new_rng_key
 
-        # Validation info.
-        new_rng_key, rng_key = jax.random.split(rng_key)
-        val_stats = collect_and_eval(
-            val_samplers[algo_idx],
-            functools.partial(eval_model.predict, algorithm_index=algo_idx, is_graph_fts_avail=is_graph_fts_avail[algo_idx]),
-            val_sample_counts[algo_idx],
-            new_rng_key,
-            extras=common_extras)
-        logging.info('(val) algo %s step %d: %s',
-                     FLAGS.algorithms[algo_idx], step, val_stats)
-        val_scores[algo_idx] = val_stats['score']
-        if FLAGS.wandb_project:
-          if step > 0:
-            avg_loss = accum_loss / FLAGS.eval_every
-            wandb.log(
-                {
-                    "loss": avg_loss,
-                    "val_score": val_stats['score'],
-                }
-            )
+        if FLAGS.chunked_training:
+          examples_in_chunk = np.sum(feedback.features.is_last).item()
+        else:
+          examples_in_chunk = len(feedback.features.lengths)
+        current_train_items[algo_idx] += examples_in_chunk
+        logging.info('Algo %s step %i current loss %f, current_train_items %i.',
+                     FLAGS.algorithms[algo_idx], step,
+                     cur_loss, current_train_items[algo_idx])
 
-      next_eval += FLAGS.eval_every
+      # Periodically evaluate model
+      if step >= next_eval:
+        eval_model.params = train_model.params
+        for algo_idx in range(len(train_samplers)):
+          common_extras = {'examples_seen': current_train_items[algo_idx],
+                           'step': step,
+                           'algorithm': FLAGS.algorithms[algo_idx]}
 
-      # If best total score, update best checkpoint.
-      # Also save a best checkpoint on the first step.
-      msg = (f'best avg val score was '
-             f'{best_score/len(FLAGS.algorithms):.3f}, '
-             f'current avg val score is {np.mean(val_scores):.3f}, '
-             f'val scores are: ')
-      msg += ', '.join(
-          ['%s: %.3f' % (x, y) for (x, y) in zip(FLAGS.algorithms, val_scores)])
-      if (sum(val_scores) > best_score) or step == 0:
-        best_score = sum(val_scores)
-        logging.info('Checkpointing best model, %s', msg)
-        train_model.save_model('best.pkl')
-      else:
-        logging.info('Not saving new best model, %s', msg)
+          # Validation info.
+          new_rng_key, rng_key = jax.random.split(rng_key)
+          val_stats = collect_and_eval(
+              val_samplers[algo_idx],
+              functools.partial(eval_model.predict, algorithm_index=algo_idx, is_graph_fts_avail=is_graph_fts_avail[algo_idx]),
+              val_sample_counts[algo_idx],
+              new_rng_key,
+              extras=common_extras)
+          logging.info('(val) algo %s step %d: %s',
+                       FLAGS.algorithms[algo_idx], step, val_stats)
+          val_scores[algo_idx] = val_stats['score']
+          if FLAGS.wandb_project:
+            if step > 0:
+              avg_loss = accum_loss / FLAGS.eval_every
+              wandb.log(
+                  {
+                      "loss": avg_loss,
+                      "val_score": val_stats['score'],
+                  }
+              )
 
-      accum_loss = 0
-      avg_loss = 0
+        next_eval += FLAGS.eval_every
 
-    step += 1
-    length_idx = (length_idx + 1) % len(train_lengths)
+        # If best total score, update best checkpoint.
+        # Also save a best checkpoint on the first step.
+        msg = (f'best avg val score was '
+               f'{best_score/len(FLAGS.algorithms):.3f}, '
+               f'current avg val score is {np.mean(val_scores):.3f}, '
+               f'val scores are: ')
+        msg += ', '.join(
+            ['%s: %.3f' % (x, y) for (x, y) in zip(FLAGS.algorithms, val_scores)])
+        if (sum(val_scores) > best_score) or step == 0:
+          best_score = sum(val_scores)
+          logging.info('Checkpointing best model, %s', msg)
+          train_model.save_model('best.pkl')
+        else:
+          logging.info('Not saving new best model, %s', msg)
 
-  logging.info(f'Restoring best model from checkpoint {FLAGS.checkpoint_path}...')
+        accum_loss = 0
+        avg_loss = 0
+
+      step += 1
+      length_idx = (length_idx + 1) % len(train_lengths)
+
+  logging.info(f'Restoring best model from checkpoint {checkpoint_path}...')
   eval_model.restore_model('best.pkl', only_load_processor=False)
 
-  for algo_idx in range(len(train_samplers)):
-    common_extras = {'examples_seen': current_train_items[algo_idx],
-                     'step': step,
-                     'algorithm': FLAGS.algorithms[algo_idx]}
+  if FLAGS.wandb_sweep_file is None or FLAGS.test == 1:
+    for algo_idx in range(len(train_samplers)):
+      common_extras = {'examples_seen': current_train_items[algo_idx],
+                      'step': step,
+                      'algorithm': FLAGS.algorithms[algo_idx]}
 
-    new_rng_key, rng_key = jax.random.split(rng_key)
-    test_stats = collect_and_eval(
-        test_samplers[algo_idx],
-        functools.partial(eval_model.predict, algorithm_index=algo_idx, is_graph_fts_avail=is_graph_fts_avail[algo_idx]),
-        test_sample_counts[algo_idx],
-        new_rng_key,
-        extras=common_extras)
-    logging.info('(test) algo %s : %s', FLAGS.algorithms[algo_idx], test_stats)
-    if FLAGS.wandb_project:
-        wandb.log({"test_score": test_stats['score']})
+      new_rng_key, rng_key = jax.random.split(rng_key)
+      test_stats = collect_and_eval(
+          test_samplers[algo_idx],
+          functools.partial(eval_model.predict, algorithm_index=algo_idx, is_graph_fts_avail=is_graph_fts_avail[algo_idx]),
+          test_sample_counts[algo_idx],
+          new_rng_key,
+          extras=common_extras)
+      logging.info('(test) algo %s : %s', FLAGS.algorithms[algo_idx], test_stats)
+      if FLAGS.wandb_project:
+          wandb.log({
+            "best_val_score": best_score,
+            "test_score": test_stats['score']})
 
   logging.info('Done!')
 
