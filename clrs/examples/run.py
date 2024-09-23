@@ -77,6 +77,8 @@ flags.DEFINE_integer('use_graph_fts', 1,
                      'Whether to use the graph features.')
 flags.DEFINE_integer('ood_val', 0,
                      'Whether to apply bigger graphs for the val. samples.')
+flags.DEFINE_integer('markov', 0,
+                     'Whether to apply Markov property.')
 flags.DEFINE_float('hint_teacher_forcing', 0.0,
                    'Probability that ground-truth teacher hints are encoded '
                    'during training instead of predicted hints. Only '
@@ -434,6 +436,7 @@ def main(unused_argv):
       "readout": FLAGS.node_readout,
       "ood_val": FLAGS.ood_val,
       "val_size": val_size,
+      "markov": FLAGS.markov,
     }
     wandb.init(
       entity=FLAGS.wandb_entity,
@@ -468,6 +471,7 @@ def main(unused_argv):
       attention_dropout=FLAGS.attention_dropout_prob,
       norm_first_att=FLAGS.norm_first_att,
       node_readout=FLAGS.node_readout,
+      markov=FLAGS.markov,
   )
   if not FLAGS.use_graph_fts:
       is_graph_fts_avail = [False] * len(is_graph_fts_avail)

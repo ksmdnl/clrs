@@ -312,9 +312,12 @@ class ET_Processor(Processor):
     assert adj_mat.shape == (b, n, n)
     is_training = not kwargs['repred']
     readout = kwargs['readout']
-    is_graph_fts_avail = kwargs["is_graph_fts_avail"]
+    is_graph_fts_avail = kwargs['is_graph_fts_avail']
+    markov = kwargs['markov']
 
-    node_fts = jnp.concatenate([node_fts, hidden], axis=-1)
+    # Markov property: Only consider current input and leave out intermediate results
+    if not markov:
+      node_fts = jnp.concatenate([node_fts, hidden], axis=-1)
     node_proj = hk.Linear(self.out_size)
 
     if is_graph_fts_avail:

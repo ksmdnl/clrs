@@ -91,6 +91,7 @@ class Net(hk.Module):
       name: str = 'net',
       norm_first: bool = False,
       node_readout: str = 'diagonal',
+      markov: int = 0,
   ):
     """Constructs a `Net`."""
     super().__init__(name=name)
@@ -112,6 +113,7 @@ class Net(hk.Module):
     self.activation = activation
     self.norm_first = norm_first
     self.node_readout = node_readout
+    self.markov = markov
 
   def _msg_passing_step(self,
                         mp_state: _MessagePassingScanState,
@@ -431,6 +433,7 @@ class Net(hk.Module):
           repred=repred,
           readout=self.node_readout,
           is_graph_fts_avail=is_graph_fts,
+          markov=self.markov,
       )
 
     if not repred:      # dropout only on training

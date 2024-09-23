@@ -160,6 +160,7 @@ class BaselineModel(model.Model):
       attention_dropout: float = 0.0,
       norm_first_att: bool = False,
       node_readout: str = 'diagonal',
+      markov: int = 0,
   ):
     """Constructor for BaselineModel.
 
@@ -245,7 +246,7 @@ class BaselineModel(model.Model):
 
     self._create_net_fns(hidden_dim, encode_hints, processor_factory, use_lstm,
                          encoder_init, dropout_prob, hint_teacher_forcing, hint_repred_mode, 
-                         num_layers, activation, attention_dropout, norm_first_att, node_readout)
+                         num_layers, activation, attention_dropout, norm_first_att, node_readout, markov)
     self._device_params = None
     self._device_opt_state = None
     self.opt_state_skeleton = None
@@ -253,13 +254,13 @@ class BaselineModel(model.Model):
   def _create_net_fns(self, hidden_dim, encode_hints, processor_factory,
                       use_lstm, encoder_init, dropout_prob,
                       hint_teacher_forcing, hint_repred_mode,
-                      num_layers, activation, attention_dropout, norm_first_att, node_readout):
+                      num_layers, activation, attention_dropout, norm_first_att, node_readout, markov):
     def _use_net(*args, **kwargs):
       return nets.Net(self._spec, hidden_dim, encode_hints, self.decode_hints,
                       processor_factory, use_lstm, encoder_init,
                       dropout_prob, hint_teacher_forcing, num_layers,
                       attention_dropout, activation, hint_repred_mode,
-                      self.nb_dims, self.nb_msg_passing_steps, norm_first=norm_first_att, node_readout=node_readout)(*args, **kwargs)
+                      self.nb_dims, self.nb_msg_passing_steps, norm_first=norm_first_att, node_readout=node_readout, markov=markov)(*args, **kwargs)
 
     self.net_fn = hk.transform(_use_net)
     pmap_args = dict(axis_name='batch', devices=jax.local_devices())
