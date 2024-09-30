@@ -475,13 +475,13 @@ def set_checkpoint(config):
       suffix = f"{config['processor']}-" \
         f"{config['activation']}-" \
         f"{config['lr']}-" \
+        f"{config['batch_size']}-" \
         f"{config['nb_heads']}-" \
         f"{config['num_layers']}-" \
         f"{config['hidden_size']}-" \
-        f"{config['attention_dropout_rate']}-" \
+        f"{config['attention_dropout_prob']}-" \
         f"{config['ood_val']}-" \
-        f"{config['seed_param']}/" \
-        f"{config['algorithm']}"
+        f"{config['seed_param']}"
       checkpoint_path = os.path.join(checkpoint_path, suffix)
   else:
     checkpoint_path = os.path.join(checkpoint_path, str(FLAGS.seed), FLAGS.algorithms[0])
