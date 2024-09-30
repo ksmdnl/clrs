@@ -692,10 +692,13 @@ def run(train_lengths, encode_hints, decode_hints):
       step += 1
       length_idx = (length_idx + 1) % len(train_lengths)
 
-  logging.info(f'Restoring best model from checkpoint {checkpoint_path}...')
-  eval_model.restore_model('best.pkl', only_load_processor=False)
+  if FLAGS.wandb_project:
+      wandb.log({"best_val_score": best_score})
 
   if FLAGS.wandb_sweep_file is None or FLAGS.test == 1:
+    logging.info(f'Restoring best model from checkpoint {checkpoint_path}...')
+    eval_model.restore_model('best.pkl', only_load_processor=False)
+
     for algo_idx in range(len(train_samplers)):
       common_extras = {'examples_seen': current_train_items[algo_idx],
                       'step': step,
@@ -710,9 +713,10 @@ def run(train_lengths, encode_hints, decode_hints):
           extras=common_extras)
       logging.info('(test) algo %s : %s', FLAGS.algorithms[algo_idx], test_stats)
       if FLAGS.wandb_project:
-          wandb.log({
-            "best_val_score": best_score,
-            "test_score": test_stats['score']})
+          wandb.log({"test_score": test_stats['score']})
+
+  else:
+    logging.info('Skippping evaluation on test set.')
 
   logging.info('Done!')
 
