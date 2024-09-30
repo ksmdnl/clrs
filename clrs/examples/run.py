@@ -517,7 +517,7 @@ def run(train_lengths, encode_hints, decode_hints):
       "nb_heads": FLAGS.nb_heads,
       "num_layers": FLAGS.num_layers,
       "hidden_size": FLAGS.hidden_size,
-      "attention_dropout_rate": FLAGS.attention_dropout_prob,
+      "attention_dropout_prob": FLAGS.attention_dropout_prob,
       "norm_first_att": FLAGS.norm_first_att,
       "seed_param": FLAGS.seed,
       "readout": FLAGS.node_readout,
